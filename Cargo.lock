@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "qr-base43"
+name = "qr-base44"
 version = "0.1.0"
 dependencies = [
  "thiserror",

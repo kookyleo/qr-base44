@@ -1,14 +1,14 @@
 [package]
-name = "qr-base43"
+name = "qr-base44"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["kookyleo <kookyleo@gmail.com>"]
-description = "Base43 encode/decode for arbitrary bytes using URL-safe QR-compatible alphabet"
+description = "Base44 encode/decode for arbitrary bytes using URL-safe QR-compatible alphabet"
 license = "Apache-2.0"
-repository = "https://github.com/kookyleo/qr-base43"
+repository = "https://github.com/kookyleo/qr-base44"
 readme = "README.md"
-keywords = ["base43", "qr", "encoding", "url-safe"]
+keywords = ["base44", "qr", "encoding", "url-safe"]
 categories = ["encoding", "no-std"]
 
 [dependencies]
