@@ -3,6 +3,9 @@
 //! - Alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ$%*+-./:" (44 chars, excludes space only)
 //! - Public API encodes &[u8] -> String and decodes &str -> Vec<u8>.
 
+use num_bigint::BigUint;
+use num_traits::{Zero, One};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Base44Error {
     #[error("invalid base44 character")]
@@ -97,6 +100,128 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
         out.push(x as u8);
     }
     Ok(out)
+}
+
+/// Encode a fixed number of bits (arbitrary length) as a Base44 string with optimal length.
+///
+/// This function treats the input bytes as a big integer containing exactly `bits` bits
+/// and encodes it using the minimum number of Base44 characters required.
+///
+/// # Optimal Encoding
+///
+/// For N bits, the optimal Base44 length is `ceil(N * log(2) / log(44))`:
+/// - 103 bits → 19 chars (2^103 < 44^19)
+/// - 104 bits → 20 chars (2^104 < 44^20)
+/// - 256 bits → 47 chars (2^256 < 44^47)
+///
+/// This is more efficient than byte-pair encoding when the bit count doesn't align
+/// with byte boundaries, saving up to 5% space for certain bit lengths.
+///
+/// # Arguments
+///
+/// * `bits` - Number of significant bits (must be > 0). Bytes are read in little-endian order.
+/// * `bytes` - Input bytes in LSB-first order (matching typical bit-packing schemes).
+///
+/// # Example
+///
+/// ```
+/// // Encode 103 bits (13 bytes with top byte using 7 bits)
+/// let data = [0u8; 13];
+/// let encoded = qr_base44::encode_bits(103, &data);
+/// assert_eq!(encoded.len(), 19); // Optimal length for 103 bits
+/// ```
+pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
+    assert!(bits > 0, "bits must be > 0");
+    let expected_bytes = (bits + 7) / 8;
+    assert!(bytes.len() >= expected_bytes,
+            "Need at least {} bytes for {} bits, got {}",
+            expected_bytes, bits, bytes.len());
+
+    // Convert bytes to BigUint (little-endian)
+    let mut value = BigUint::zero();
+    for (i, &b) in bytes.iter().take(expected_bytes).enumerate() {
+        value += BigUint::from(b) << (i * 8);
+    }
+
+    // Calculate optimal character count: ceil(bits * log(2) / log(44))
+    let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
+
+    // Convert to base44
+    let mut result = Vec::with_capacity(chars_needed);
+    let forty_four = BigUint::from(44u32);
+    let mut v = value;
+
+    for _ in 0..chars_needed {
+        let digit = (&v % &forty_four).to_u32_digits();
+        let d = if digit.is_empty() { 0 } else { digit[0] as usize };
+        result.push(BASE44_ALPHABET[d]);
+        v /= &forty_four;
+    }
+
+    // Reverse to get most significant digit first
+    result.reverse();
+    String::from_utf8(result).unwrap()
+}
+
+/// Decode a Base44 string back to bytes, expecting a specific bit count.
+///
+/// This is the inverse of [`encode_bits`]. The output bytes are in little-endian order
+/// (LSB-first), matching typical bit-packing schemes.
+///
+/// # Arguments
+///
+/// * `bits` - Expected number of significant bits (must be > 0)
+/// * `s` - Base44 string to decode
+///
+/// # Returns
+///
+/// A vector of bytes in LSB-first order containing exactly `ceil(bits / 8)` bytes.
+/// Returns an error if the string contains invalid characters or the decoded value
+/// exceeds the specified bit count.
+///
+/// # Example
+///
+/// ```
+/// let encoded = qr_base44::encode_bits(103, &[0u8; 13]);
+/// let decoded = qr_base44::decode_bits(103, &encoded).unwrap();
+/// assert_eq!(decoded.len(), 13);
+/// ```
+pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
+    assert!(bits > 0, "bits must be > 0");
+
+    // Convert base44 string to BigUint
+    let mut value = BigUint::zero();
+    let forty_four = BigUint::from(44u32);
+
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)?;
+        value = value * &forty_four + BigUint::from(digit as u32);
+    }
+
+    // Verify value fits in specified bits
+    let max_value = if bits < usize::MAX {
+        (BigUint::one() << bits) - BigUint::one()
+    } else {
+        // For very large bit counts, skip overflow check
+        value.clone()
+    };
+
+    if value > max_value {
+        return Err(Base44Error::Overflow);
+    }
+
+    // Convert to bytes (little-endian)
+    let byte_count = (bits + 7) / 8;
+    let mut bytes = vec![0u8; byte_count];
+    let value_bytes = value.to_bytes_le();
+
+    for (i, &b) in value_bytes.iter().enumerate() {
+        if i < byte_count {
+            bytes[i] = b;
+        }
+    }
+
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -227,5 +352,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn optimal_bit_encoding_103() {
+        // Test optimal encoding for 103 bits (common use case: UUID compression)
+        // 2^103 < 44^19, so 103 bits should encode to exactly 19 characters
+        let mut data = [0xFFu8; 13];
+        data[12] = 0x7F; // Only 7 bits in last byte for 103 total bits
+        let encoded = encode_bits(103, &data);
+        assert_eq!(encoded.len(), 19, "103 bits should encode to 19 chars");
+
+        let decoded = decode_bits(103, &encoded).unwrap();
+        assert_eq!(decoded, data.to_vec(), "Roundtrip should preserve data");
+    }
+
+    #[test]
+    fn optimal_bit_encoding_roundtrip() {
+        // Test various bit lengths for roundtrip accuracy
+        let test_cases = vec![
+            (8, vec![0x42]),
+            (16, vec![0x12, 0x34]),
+            (24, vec![0xAB, 0xCD, 0xEF]),
+            (103, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D]),
+            (128, vec![0xFF; 16]),
+        ];
+
+        for (bits, data) in test_cases {
+            let encoded = encode_bits(bits, &data);
+            let decoded = decode_bits(bits, &encoded).unwrap();
+
+            // Compare only the relevant bits
+            let byte_count = (bits + 7) / 8;
+            assert_eq!(decoded.len(), byte_count);
+
+            // Verify data matches (may need to mask last byte)
+            for i in 0..byte_count {
+                if i == byte_count - 1 && bits % 8 != 0 {
+                    let mask = (1u8 << (bits % 8)) - 1;
+                    assert_eq!(decoded[i] & mask, data[i] & mask);
+                } else {
+                    assert_eq!(decoded[i], data[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optimal_vs_byte_pair_comparison() {
+        // Compare optimal bit encoding vs byte-pair encoding for 103 bits
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+        let optimal = encode_bits(103, &data);
+        let byte_pair = encode(&data);
+
+        // Optimal should be 19 chars, byte-pair should be 20 chars
+        assert_eq!(optimal.len(), 19);
+        assert_eq!(byte_pair.len(), 20);
+
+        println!("103 bits: optimal={} chars, byte-pair={} chars, savings={}%",
+                 optimal.len(), byte_pair.len(),
+                 (byte_pair.len() - optimal.len()) * 100 / byte_pair.len());
+    }
+
+    #[test]
+    fn optimal_bit_encoding_edge_cases() {
+        // Test edge cases
+
+        // All zeros
+        let zeros = vec![0u8; 13];
+        let encoded_zeros = encode_bits(103, &zeros);
+        assert_eq!(encoded_zeros.len(), 19);
+        let decoded_zeros = decode_bits(103, &encoded_zeros).unwrap();
+        assert_eq!(decoded_zeros, zeros);
+
+        // Single bit
+        let one_bit = vec![0x01];
+        let encoded_one = encode_bits(1, &one_bit);
+        let decoded_one = decode_bits(1, &encoded_one).unwrap();
+        assert_eq!(decoded_one[0] & 0x01, 1);
+
+        // Maximum value for 103 bits
+        let mut max_103 = vec![0xFFu8; 13];
+        max_103[12] = 0x7F; // Only 7 bits in last byte
+        let encoded_max = encode_bits(103, &max_103);
+        let decoded_max = decode_bits(103, &encoded_max).unwrap();
+        assert_eq!(decoded_max, max_103);
+    }
+
+    #[test]
+    fn large_bit_counts() {
+        // Test 256 bits (SHA-256 hash size)
+        let data_256 = vec![0x42u8; 32]; // 256 bits
+        let encoded_256 = encode_bits(256, &data_256);
+        // 256 bits should encode to ceil(256 * ln(2) / ln(44)) = 47 chars
+        assert_eq!(encoded_256.len(), 47);
+        let decoded_256 = decode_bits(256, &encoded_256).unwrap();
+        assert_eq!(decoded_256, data_256);
+
+        // Test 512 bits
+        let data_512 = vec![0xABu8; 64]; // 512 bits
+        let encoded_512 = encode_bits(512, &data_512);
+        // 512 bits should encode to ceil(512 * ln(2) / ln(44)) = 94 chars
+        assert_eq!(encoded_512.len(), 94);
+        let decoded_512 = decode_bits(512, &encoded_512).unwrap();
+        assert_eq!(decoded_512, data_512);
+
+        // Test 1024 bits
+        let data_1024 = vec![0x11u8; 128]; // 1024 bits
+        let encoded_1024 = encode_bits(1024, &data_1024);
+        let decoded_1024 = decode_bits(1024, &encoded_1024).unwrap();
+        assert_eq!(decoded_1024, data_1024);
     }
 }

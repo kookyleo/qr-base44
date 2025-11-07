@@ -13,6 +13,8 @@ categories = ["encoding", "no-std"]
 
 [dependencies]
 thiserror = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [features]
 # Optional no_std support without alloc is difficult since String/Vec are required.
