@@ -59,15 +59,18 @@ assert_eq!(back, data);
 
 For fixed-bit-length data, `encode_bits` achieves optimal compression:
 
-| Bits | Bytes | `encode` (byte-pair) | `encode_bits` (optimal) | Savings |
-|------|-------|---------------------|------------------------|---------|
-| 103  | 13    | 20 chars            | 19 chars               | 5.0%    |
-| 104  | 13    | 20 chars            | 20 chars               | 0%      |
-| 128  | 16    | 24 chars            | 24 chars               | 0%      |
-| 256  | 32    | 48 chars            | 47 chars               | 2.1%    |
-| 512  | 64    | 96 chars            | 94 chars               | 2.1%    |
+| Bits | Bytes | `encode` (byte-pair) | `encode_bits` (optimal) | Savings | Use Case |
+|------|-------|---------------------|------------------------|---------|----------|
+| 103  | 13    | 20 chars            | 19 chars               | 5.0%    | Compressed UUID (qr-url) |
+| 104  | 13    | 20 chars            | 20 chars               | 0%      | - |
+| 128  | 16    | 24 chars            | 24 chars               | 0%      | UUID, AES-128 key |
+| 256  | 32    | 48 chars            | 47 chars               | 2.1%    | SHA-256 hash, AES-256 key |
+| 512  | 64    | 96 chars            | 94 chars               | 2.1%    | SHA-512 hash |
 
-*Note: Use `encode_bits` when bit count is known and doesn't align well with byte boundaries.*
+**When to use `encode_bits`**:
+- ✅ Bit count known and doesn't align with byte boundaries (103, 256, 512 bits)
+- ✅ Need guaranteed fixed output length
+- ❌ Arbitrary-length data or byte-aligned sizes (use `encode` instead)
 
 ## Notes
 
