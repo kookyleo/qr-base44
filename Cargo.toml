@@ -13,10 +13,10 @@ categories = ["encoding", "no-std"]
 
 [dependencies]
 thiserror = "1"
-num-bigint = "0.4"
-num-traits = "0.2"
+num-bigint = { version = "0.4", optional = true }
+num-traits = { version = "0.2", optional = true }
 
 [features]
-# Optional no_std support without alloc is difficult since String/Vec are required.
-# We keep std by default and allow "alloc" only builds if needed later.
 default = []
+# Enable arbitrary-precision encoding for bit counts > 128
+bigint = ["num-bigint", "num-traits"]

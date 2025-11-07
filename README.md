@@ -14,6 +14,9 @@ Base44 encoder/decoder for arbitrary bytes using a URL-safe QR-compatible alphab
 
 ```bash
 cargo add qr-base44
+
+# For bit counts > 128 (e.g., SHA-512, RSA keys), enable bigint feature
+cargo add qr-base44 --features bigint
 ```
 
 ### Basic byte-pair encoding
@@ -52,7 +55,9 @@ assert_eq!(back, data);
 - **QR-compatible**: Uses a subset of QR Code alphanumeric mode characters
 - **Dual encoding modes**:
   - **Byte-pair encoding**: General-purpose, ~1.5x size overhead
-  - **Optimal bit encoding**: For fixed bit lengths (arbitrary size, uses BigInt), achieves theoretical minimum character count
+  - **Optimal bit encoding**: For fixed bit lengths, achieves theoretical minimum character count
+    - Default (u128): Fast, zero extra dependencies, supports up to 128 bits
+    - With `bigint` feature: Arbitrary precision for any bit count
 - **Error handling**: Validates input and reports invalid characters, dangling groups, and overflow
 
 ### Encoding Comparison

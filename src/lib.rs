@@ -2,8 +2,15 @@
 //! - Encoding groups: 2 bytes -> 3 chars; 1 byte -> 2 chars.
 //! - Alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ$%*+-./:" (44 chars, excludes space only)
 //! - Public API encodes &[u8] -> String and decodes &str -> Vec<u8>.
+//!
+//! ## Optimal Bit Encoding
+//!
+//! By default, `encode_bits` uses fast u128 arithmetic for bit counts ≤ 128.
+//! Enable the `bigint` feature for arbitrary-precision support (bit counts > 128).
 
+#[cfg(feature = "bigint")]
 use num_bigint::BigUint;
+#[cfg(feature = "bigint")]
 use num_traits::{Zero, One};
 
 #[derive(Debug, thiserror::Error)]
@@ -102,25 +109,30 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
     Ok(out)
 }
 
-/// Encode a fixed number of bits (arbitrary length) as a Base44 string with optimal length.
+/// Encode a fixed number of bits as a Base44 string with optimal length.
 ///
 /// This function treats the input bytes as a big integer containing exactly `bits` bits
 /// and encodes it using the minimum number of Base44 characters required.
+///
+/// # Implementations
+///
+/// - **Default** (no features): Fast u128-based implementation for bits ≤ 128
+/// - **With `bigint` feature**: Arbitrary-precision BigUint for any bit count
 ///
 /// # Optimal Encoding
 ///
 /// For N bits, the optimal Base44 length is `ceil(N * log(2) / log(44))`:
 /// - 103 bits → 19 chars (2^103 < 44^19)
 /// - 104 bits → 20 chars (2^104 < 44^20)
-/// - 256 bits → 47 chars (2^256 < 44^47)
+/// - 256 bits → 47 chars (2^256 < 44^47) - requires `bigint` feature
 ///
 /// This is more efficient than byte-pair encoding when the bit count doesn't align
 /// with byte boundaries, saving up to 5% space for certain bit lengths.
 ///
 /// # Arguments
 ///
-/// * `bits` - Number of significant bits (must be > 0). Bytes are read in little-endian order.
-/// * `bytes` - Input bytes in LSB-first order (matching typical bit-packing schemes).
+/// * `bits` - Number of significant bits (1-128 without `bigint`, unlimited with `bigint`)
+/// * `bytes` - Input bytes in LSB-first order (matching typical bit-packing schemes)
 ///
 /// # Example
 ///
@@ -130,6 +142,37 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
 /// let encoded = qr_base44::encode_bits(103, &data);
 /// assert_eq!(encoded.len(), 19); // Optimal length for 103 bits
 /// ```
+#[cfg(not(feature = "bigint"))]
+pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
+    assert!(bits > 0 && bits <= 128, "bits must be 1-128 (enable 'bigint' feature for larger values)");
+    let expected_bytes = (bits + 7) / 8;
+    assert!(bytes.len() >= expected_bytes,
+            "Need at least {} bytes for {} bits, got {}",
+            expected_bytes, bits, bytes.len());
+
+    // Convert bytes to u128 (little-endian)
+    let mut value: u128 = 0;
+    for (i, &b) in bytes.iter().take(expected_bytes).enumerate() {
+        value |= (b as u128) << (i * 8);
+    }
+
+    // Calculate optimal character count
+    let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
+
+    // Convert to base44
+    let mut result = Vec::with_capacity(chars_needed);
+    let mut v = value;
+    for _ in 0..chars_needed {
+        let digit = (v % 44) as usize;
+        result.push(BASE44_ALPHABET[digit]);
+        v /= 44;
+    }
+
+    result.reverse();
+    String::from_utf8(result).unwrap()
+}
+
+#[cfg(feature = "bigint")]
 pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
     assert!(bits > 0, "bits must be > 0");
     let expected_bytes = (bits + 7) / 8;
@@ -143,7 +186,7 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
         value += BigUint::from(b) << (i * 8);
     }
 
-    // Calculate optimal character count: ceil(bits * log(2) / log(44))
+    // Calculate optimal character count
     let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
 
     // Convert to base44
@@ -158,7 +201,6 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
         v /= &forty_four;
     }
 
-    // Reverse to get most significant digit first
     result.reverse();
     String::from_utf8(result).unwrap()
 }
@@ -170,7 +212,7 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
 ///
 /// # Arguments
 ///
-/// * `bits` - Expected number of significant bits (must be > 0)
+/// * `bits` - Expected number of significant bits (1-128 without `bigint`, unlimited with `bigint`)
 /// * `s` - Base44 string to decode
 ///
 /// # Returns
@@ -186,6 +228,35 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
 /// let decoded = qr_base44::decode_bits(103, &encoded).unwrap();
 /// assert_eq!(decoded.len(), 13);
 /// ```
+#[cfg(not(feature = "bigint"))]
+pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
+    assert!(bits > 0 && bits <= 128, "bits must be 1-128 (enable 'bigint' feature for larger values)");
+
+    // Convert base44 string to u128
+    let mut value: u128 = 0;
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)? as u128;
+        value = value.checked_mul(44).ok_or(Base44Error::Overflow)?;
+        value = value.checked_add(digit).ok_or(Base44Error::Overflow)?;
+    }
+
+    // Verify value fits in specified bits
+    if bits < 128 && value >= (1u128 << bits) {
+        return Err(Base44Error::Overflow);
+    }
+
+    // Convert to bytes (little-endian)
+    let byte_count = (bits + 7) / 8;
+    let mut bytes = vec![0u8; byte_count];
+    for i in 0..byte_count {
+        bytes[i] = (value & 0xFF) as u8;
+        value >>= 8;
+    }
+
+    Ok(bytes)
+}
+
+#[cfg(feature = "bigint")]
 pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
     assert!(bits > 0, "bits must be > 0");
 
@@ -202,7 +273,6 @@ pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
     let max_value = if bits < usize::MAX {
         (BigUint::one() << bits) - BigUint::one()
     } else {
-        // For very large bit counts, skip overflow check
         value.clone()
     };
 
@@ -441,6 +511,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bigint")]
     fn large_bit_counts() {
         // Test 256 bits (SHA-256 hash size)
         let data_256 = vec![0x42u8; 32]; // 256 bits
