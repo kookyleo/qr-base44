@@ -29,7 +29,7 @@ assert_eq!(back, data);
 
 ### Optimal bit-level encoding (new!)
 
-For fixed bit lengths (up to 128 bits), use `encode_bits` for optimal space efficiency:
+For fixed bit lengths (arbitrary size), use `encode_bits` for optimal space efficiency:
 
 ```rust
 use qr_base44::{encode_bits, decode_bits};
@@ -52,7 +52,7 @@ assert_eq!(back, data);
 - **QR-compatible**: Uses a subset of QR Code alphanumeric mode characters
 - **Dual encoding modes**:
   - **Byte-pair encoding**: General-purpose, ~1.5x size overhead
-  - **Optimal bit encoding**: For fixed bit lengths (1-128 bits), achieves theoretical minimum character count
+  - **Optimal bit encoding**: For fixed bit lengths (arbitrary size, uses BigInt), achieves theoretical minimum character count
 - **Error handling**: Validates input and reports invalid characters, dangling groups, and overflow
 
 ### Encoding Comparison
@@ -64,6 +64,8 @@ For fixed-bit-length data, `encode_bits` achieves optimal compression:
 | 103  | 13    | 20 chars            | 19 chars               | 5.0%    |
 | 104  | 13    | 20 chars            | 20 chars               | 0%      |
 | 128  | 16    | 24 chars            | 25 chars               | -4.2%   |
+| 256  | 32    | 48 chars            | 47 chars               | 2.1%    |
+| 512  | 64    | 96 chars            | 94 chars               | 2.1%    |
 
 *Note: Use `encode_bits` when bit count is known and doesn't align well with byte boundaries.*
 
