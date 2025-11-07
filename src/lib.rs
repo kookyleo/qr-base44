@@ -99,6 +99,110 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
     Ok(out)
 }
 
+/// Encode exactly 103 bits (packed in 13 bytes) as a u128 integer into a 19-character Base44 string.
+///
+/// This is optimal encoding for 103-bit data: 2^103 < 44^19, so all 103-bit values
+/// fit exactly in 19 Base44 characters.
+///
+/// **Important**: The input must represent a value that fits in 103 bits. This means
+/// byte 12 (the last byte) must have its MSB set to 0 (i.e., byte[12] <= 0x7F).
+/// Values exceeding 103 bits may produce incorrect results or panic.
+///
+/// # Note on byte ordering
+/// Bytes are interpreted in little-endian order (LSB-first), consistent with
+/// typical bit-packing conventions where bits are packed from LSB to MSB.
+///
+/// # Example
+/// ```
+/// use qr_base44::encode_103bits;
+///
+/// // Example: 103-bit value packed in 13 bytes (last byte MSB = 0)
+/// let data: [u8; 13] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+///                       0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x7F];  // Note: 0x7F, not 0xFF
+/// let encoded = encode_103bits(&data);
+/// assert_eq!(encoded.len(), 19);
+/// ```
+pub fn encode_103bits(bytes: &[u8; 13]) -> String {
+    // Convert 13 bytes to u128 (little-endian, LSB-first)
+    let mut value: u128 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        value |= (b as u128) << (i * 8);
+    }
+
+    // Convert to base44 (exactly 19 digits)
+    let mut result = Vec::with_capacity(19);
+    let mut v = value;
+    for _ in 0..19 {
+        let digit = (v % 44) as usize;
+        result.push(BASE44_ALPHABET[digit]);
+        v /= 44;
+    }
+
+    // Reverse to get most significant digit first
+    result.reverse();
+    // SAFETY: BASE44_ALPHABET contains only ASCII characters
+    unsafe { String::from_utf8_unchecked(result) }
+}
+
+/// Decode a 19-character Base44 string back to exactly 103 bits (packed in 13 bytes).
+///
+/// Returns bytes in little-endian order (LSB-first), matching the encoding convention.
+/// The returned value is guaranteed to fit in 103 bits (byte 12 will have MSB = 0).
+///
+/// # Errors
+///
+/// Returns error if:
+/// - Length is not exactly 19 characters
+/// - Contains characters not in Base44 alphabet
+/// - Numeric value exceeds 103 bits (overflow)
+///
+/// # Example
+/// ```
+/// use qr_base44::{encode_103bits, decode_103bits};
+///
+/// let data: [u8; 13] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+///                       0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x7F];  // Last byte <= 0x7F
+/// let encoded = encode_103bits(&data);
+/// let decoded = decode_103bits(&encoded).unwrap();
+/// assert_eq!(data, decoded);
+/// ```
+pub fn decode_103bits(s: &str) -> Result<[u8; 13], Base44Error> {
+    if s.len() != 19 {
+        return Err(Base44Error::Dangling);
+    }
+
+    // Convert base44 string to u128
+    let mut value: u128 = 0;
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)? as u128;
+
+        // Check for overflow before multiplication
+        // 44^19 = 16,811,282,773,058,972,887,713,478,344,704
+        // u128::MAX = 340,282,366,920,938,463,463,374,607,431,768,211,455
+        // Safe to multiply by 44 as long as value < u128::MAX / 44
+        if value > u128::MAX / 44 {
+            return Err(Base44Error::Overflow);
+        }
+
+        value = value * 44 + digit;
+    }
+
+    // Convert u128 back to 13 bytes (little-endian)
+    let mut bytes = [0u8; 13];
+    for i in 0..13 {
+        bytes[i] = (value & 0xFF) as u8;
+        value >>= 8;
+    }
+
+    // Verify that the value fit in 103 bits
+    // After extracting 13 bytes (104 bits), remaining value should be 0
+    if value != 0 {
+        return Err(Base44Error::Overflow);
+    }
+
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +331,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fixed_length_roundtrip() {
+        // Test with various patterns
+        let test_cases: &[[u8; 13]] = &[
+            [0x00; 13], // All zeros
+            [
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            ],
+            // Max value for 103 bits: last byte (byte 12) MSB must be 0
+            [
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
+            ],
+        ];
+
+        for &data in test_cases {
+            let encoded = encode_103bits(&data);
+            assert_eq!(encoded.len(), 19, "Encoded length should be exactly 19");
+
+            let decoded = decode_103bits(&encoded)
+                .unwrap_or_else(|_| panic!("Failed to decode: {}", encoded));
+            assert_eq!(data, decoded, "Roundtrip failed for {:02X?}", data);
+        }
+    }
+
+    #[test]
+    fn fixed_length_exactly_19_chars() {
+        // Verify 100 random-like patterns all encode to exactly 19 characters
+        for i in 0..100 {
+            let mut data = [0u8; 13];
+            // Use pseudo-random pattern based on index
+            for j in 0..13 {
+                data[j] = ((i * 17 + j * 23) % 256) as u8;
+            }
+            // Ensure MSB of last byte is 0 to stay within 103 bits
+            data[12] &= 0x7F;
+
+            let encoded = encode_103bits(&data);
+            assert_eq!(encoded.len(), 19);
+
+            let decoded = decode_103bits(&encoded).unwrap();
+            assert_eq!(data, decoded);
+        }
+    }
+
+    #[test]
+    fn fixed_invalid_length() {
+        // Too short
+        assert!(matches!(
+            decode_103bits("TOOSHORT"),
+            Err(Base44Error::Dangling)
+        ));
+
+        // Too long (23 chars)
+        assert!(matches!(
+            decode_103bits("WAYTOOLONGFORBASE44SURE"),
+            Err(Base44Error::Dangling)
+        ));
+
+        // 18 chars
+        assert!(matches!(
+            decode_103bits("012345678901234567"),
+            Err(Base44Error::Dangling)
+        ));
+
+        // 20 chars
+        assert!(matches!(
+            decode_103bits("01234567890123456789"),
+            Err(Base44Error::Dangling)
+        ));
+    }
+
+    #[test]
+    fn fixed_invalid_chars() {
+        assert!(matches!(
+            decode_103bits("ABC!EFGHIJ123456789"), // '!' not in alphabet
+            Err(Base44Error::InvalidChar)
+        ));
+
+        assert!(matches!(
+            decode_103bits("abcdefghij123456789"), // lowercase not allowed
+            Err(Base44Error::InvalidChar)
+        ));
+
+        assert!(matches!(
+            decode_103bits("ABC EFGHIJ123456789"), // space not in alphabet
+            Err(Base44Error::InvalidChar)
+        ));
+    }
+
+    #[test]
+    fn comparison_with_byte_pair_encoding() {
+        // Compare output length: optimal vs byte-pair
+        let data = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+        ];
+
+        let optimal = encode_103bits(&data);
+        let byte_pair = encode(&data);
+
+        // Verify size difference
+        assert_eq!(optimal.len(), 19);
+        assert_eq!(byte_pair.len(), 20);
+
+        // Both should decode back to original
+        let decoded_optimal = decode_103bits(&optimal).unwrap();
+        let decoded_byte_pair = decode(&byte_pair).unwrap();
+
+        assert_eq!(data.as_slice(), decoded_optimal.as_slice());
+        assert_eq!(data.as_slice(), decoded_byte_pair.as_slice());
     }
 }
