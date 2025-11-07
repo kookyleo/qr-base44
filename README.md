@@ -46,13 +46,15 @@ assert_eq!(back, data);
 // Savings: 5% for 103-bit data
 ```
 
+**Performance optimization:** `encode_bits`/`decode_bits` automatically use native integer types (u64 for ≤64 bits, u128 for ≤128 bits) instead of BigInt for better performance on common bit sizes.
+
 ## Features
 
 - **URL-safe**: Unlike Base45, Base44 removes the space character which can cause issues in URLs
 - **QR-compatible**: Uses a subset of QR Code alphanumeric mode characters
 - **Dual encoding modes**:
-  - **Byte-pair encoding**: General-purpose, ~1.5x size overhead
-  - **Optimal bit encoding**: For fixed bit lengths (arbitrary size, uses BigInt), achieves theoretical minimum character count
+  - **Byte-pair encoding** (`encode`/`decode`): Fast, general-purpose encoding with simple integer operations. Best for arbitrary-length byte data.
+  - **Optimal bit encoding** (`encode_bits`/`decode_bits`): Space-optimal encoding for fixed bit lengths using BigInt. Best when every character counts and bit length is known.
 - **Error handling**: Validates input and reports invalid characters, dangling groups, and overflow
 
 ### Encoding Comparison
@@ -67,10 +69,24 @@ For fixed-bit-length data, `encode_bits` achieves optimal compression:
 | 256  | 32    | 48 chars            | 47 chars               | 2.1%    | SHA-256 hash, AES-256 key |
 | 512  | 64    | 96 chars            | 94 chars               | 2.1%    | SHA-512 hash |
 
-**When to use `encode_bits`**:
-- ✅ Bit count known and doesn't align with byte boundaries (103, 256, 512 bits)
-- ✅ Need guaranteed fixed output length
-- ❌ Arbitrary-length data or byte-aligned sizes (use `encode` instead)
+### Choosing the Right API
+
+**Use `encode`/`decode` (byte-pair) when:**
+- ✅ Working with arbitrary-length byte data
+- ✅ Performance is important (no BigInt overhead)
+- ✅ Simplicity matters (no need to specify bit count)
+- ✅ Want minimal dependencies
+
+**Use `encode_bits`/`decode_bits` (optimal) when:**
+- ✅ Bit count is known and fixed
+- ✅ Bit count doesn't align with byte boundaries (e.g., 103, 256, 512 bits)
+- ✅ Every character counts and space efficiency is critical
+- ✅ Need guaranteed fixed output length for specific bit counts
+
+**Performance vs Space Trade-off:**
+- `encode` is **significantly faster** (simple integer ops vs BigInt)
+- `encode_bits` saves **at most 5% space** for non-byte-aligned bit counts
+- For byte-aligned data (8, 16, 24, 128 bits), both produce the **same output length**
 
 ## Notes
 

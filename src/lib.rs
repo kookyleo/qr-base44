@@ -4,7 +4,7 @@
 //! - Public API encodes &[u8] -> String and decodes &str -> Vec<u8>.
 
 use num_bigint::BigUint;
-use num_traits::{Zero, One};
+use num_traits::{One, Zero};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Base44Error {
@@ -117,6 +117,13 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
 /// This is more efficient than byte-pair encoding when the bit count doesn't align
 /// with byte boundaries, saving up to 5% space for certain bit lengths.
 ///
+/// # Performance Optimization
+///
+/// For small bit counts, native integer types are used for better performance:
+/// - bits ≤ 64: uses u64 (fastest)
+/// - bits ≤ 128: uses u128 (fast)
+/// - bits > 128: uses BigUint (fallback)
+///
 /// # Arguments
 ///
 /// * `bits` - Number of significant bits (must be > 0). Bytes are read in little-endian order.
@@ -132,10 +139,72 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
 /// ```
 pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
     assert!(bits > 0, "bits must be > 0");
-    let expected_bytes = (bits + 7) / 8;
-    assert!(bytes.len() >= expected_bytes,
-            "Need at least {} bytes for {} bits, got {}",
-            expected_bytes, bits, bytes.len());
+    let expected_bytes = bits.div_ceil(8);
+    assert!(
+        bytes.len() >= expected_bytes,
+        "Need at least {} bytes for {} bits, got {}",
+        expected_bytes,
+        bits,
+        bytes.len()
+    );
+
+    // Use optimized paths for common bit sizes
+    if bits <= 64 {
+        encode_bits_u64(bits, bytes)
+    } else if bits <= 128 {
+        encode_bits_u128(bits, bytes)
+    } else {
+        encode_bits_bigint(bits, bytes)
+    }
+}
+
+/// Fast path for bits <= 64 using u64
+#[inline]
+fn encode_bits_u64(bits: usize, bytes: &[u8]) -> String {
+    let expected_bytes = bits.div_ceil(8);
+    let mut value = 0u64;
+    for (i, &b) in bytes.iter().take(expected_bytes).enumerate() {
+        value |= (b as u64) << (i * 8);
+    }
+
+    let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
+    let mut result = Vec::with_capacity(chars_needed);
+
+    for _ in 0..chars_needed {
+        let digit = (value % 44) as usize;
+        result.push(BASE44_ALPHABET[digit]);
+        value /= 44;
+    }
+
+    result.reverse();
+    String::from_utf8(result).unwrap()
+}
+
+/// Fast path for bits <= 128 using u128
+#[inline]
+fn encode_bits_u128(bits: usize, bytes: &[u8]) -> String {
+    let expected_bytes = bits.div_ceil(8);
+    let mut value = 0u128;
+    for (i, &b) in bytes.iter().take(expected_bytes).enumerate() {
+        value |= (b as u128) << (i * 8);
+    }
+
+    let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
+    let mut result = Vec::with_capacity(chars_needed);
+
+    for _ in 0..chars_needed {
+        let digit = (value % 44) as usize;
+        result.push(BASE44_ALPHABET[digit]);
+        value /= 44;
+    }
+
+    result.reverse();
+    String::from_utf8(result).unwrap()
+}
+
+/// Fallback path for bits > 128 using BigUint
+fn encode_bits_bigint(bits: usize, bytes: &[u8]) -> String {
+    let expected_bytes = bits.div_ceil(8);
 
     // Convert bytes to BigUint (little-endian)
     let mut value = BigUint::zero();
@@ -153,7 +222,11 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
 
     for _ in 0..chars_needed {
         let digit = (&v % &forty_four).to_u32_digits();
-        let d = if digit.is_empty() { 0 } else { digit[0] as usize };
+        let d = if digit.is_empty() {
+            0
+        } else {
+            digit[0] as usize
+        };
         result.push(BASE44_ALPHABET[d]);
         v /= &forty_four;
     }
@@ -167,6 +240,13 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
 ///
 /// This is the inverse of [`encode_bits`]. The output bytes are in little-endian order
 /// (LSB-first), matching typical bit-packing schemes.
+///
+/// # Performance Optimization
+///
+/// For small bit counts, native integer types are used for better performance:
+/// - bits ≤ 64: uses u64 (fastest)
+/// - bits ≤ 128: uses u128 (fast)
+/// - bits > 128: uses BigUint (fallback)
 ///
 /// # Arguments
 ///
@@ -189,6 +269,80 @@ pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
 pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
     assert!(bits > 0, "bits must be > 0");
 
+    // Use optimized paths for common bit sizes
+    if bits <= 64 {
+        decode_bits_u64(bits, s)
+    } else if bits <= 128 {
+        decode_bits_u128(bits, s)
+    } else {
+        decode_bits_bigint(bits, s)
+    }
+}
+
+/// Fast path for bits <= 64 using u64
+#[inline]
+fn decode_bits_u64(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
+    let mut value = 0u64;
+
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)?;
+        value = value
+            .checked_mul(44)
+            .and_then(|v| v.checked_add(digit as u64))
+            .ok_or(Base44Error::Overflow)?;
+    }
+
+    // Verify value fits in specified bits
+    if bits < 64 {
+        let max_value = (1u64 << bits) - 1;
+        if value > max_value {
+            return Err(Base44Error::Overflow);
+        }
+    }
+
+    // Convert to bytes (little-endian)
+    let byte_count = bits.div_ceil(8);
+    let mut bytes = vec![0u8; byte_count];
+    for (i, byte) in bytes.iter_mut().enumerate().take(byte_count) {
+        *byte = (value >> (i * 8)) as u8;
+    }
+
+    Ok(bytes)
+}
+
+/// Fast path for bits <= 128 using u128
+#[inline]
+fn decode_bits_u128(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
+    let mut value = 0u128;
+
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)?;
+        value = value
+            .checked_mul(44)
+            .and_then(|v| v.checked_add(digit as u128))
+            .ok_or(Base44Error::Overflow)?;
+    }
+
+    // Verify value fits in specified bits
+    if bits < 128 {
+        let max_value = (1u128 << bits) - 1;
+        if value > max_value {
+            return Err(Base44Error::Overflow);
+        }
+    }
+
+    // Convert to bytes (little-endian)
+    let byte_count = bits.div_ceil(8);
+    let mut bytes = vec![0u8; byte_count];
+    for (i, byte) in bytes.iter_mut().enumerate().take(byte_count) {
+        *byte = (value >> (i * 8)) as u8;
+    }
+
+    Ok(bytes)
+}
+
+/// Fallback path for bits > 128 using BigUint
+fn decode_bits_bigint(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
     // Convert base44 string to BigUint
     let mut value = BigUint::zero();
     let forty_four = BigUint::from(44u32);
@@ -211,7 +365,7 @@ pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
     }
 
     // Convert to bytes (little-endian)
-    let byte_count = (bits + 7) / 8;
+    let byte_count = bits.div_ceil(8);
     let mut bytes = vec![0u8; byte_count];
     let value_bytes = value.to_bytes_le();
 
@@ -310,12 +464,13 @@ mod tests {
             // For positions 0-33 (0-9, A-X), can safely use "00{ch}" without overflow
             // Position 34 (Y) onwards: 34*44^2 = 65824 > 65535, so use "{ch}0" format
             if idx < 34 {
-                let s = format!("00{}", ch);
-                decode(&s).expect(&format!("Character {} should be valid in 3-char group", ch));
+                let s = format!("00{ch}");
+                decode(&s)
+                    .unwrap_or_else(|_| panic!("Character {ch} should be valid in 3-char group"));
             } else {
                 // For chars that would overflow in "00{ch}" format, use "{ch}0" (value < 255)
-                let s = format!("{}0", ch);
-                decode(&s).expect(&format!("Character {} should be valid", ch));
+                let s = format!("{ch}0");
+                decode(&s).unwrap_or_else(|_| panic!("Character {ch} should be valid"));
             }
         }
 
@@ -347,8 +502,7 @@ mod tests {
             for ch in encoded.chars() {
                 assert!(
                     BASE44_ALPHABET.contains(&(ch as u8)),
-                    "Character {} not in alphabet",
-                    ch
+                    "Character {ch} not in alphabet"
                 );
             }
         }
@@ -374,7 +528,12 @@ mod tests {
             (8, vec![0x42]),
             (16, vec![0x12, 0x34]),
             (24, vec![0xAB, 0xCD, 0xEF]),
-            (103, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D]),
+            (
+                103,
+                vec![
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+                ],
+            ),
             (128, vec![0xFF; 16]),
         ];
 
@@ -383,7 +542,7 @@ mod tests {
             let decoded = decode_bits(bits, &encoded).unwrap();
 
             // Compare only the relevant bits
-            let byte_count = (bits + 7) / 8;
+            let byte_count = bits.div_ceil(8);
             assert_eq!(decoded.len(), byte_count);
 
             // Verify data matches (may need to mask last byte)
@@ -401,7 +560,9 @@ mod tests {
     #[test]
     fn optimal_vs_byte_pair_comparison() {
         // Compare optimal bit encoding vs byte-pair encoding for 103 bits
-        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let data = [
+            0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55,
+        ];
 
         let optimal = encode_bits(103, &data);
         let byte_pair = encode(&data);
@@ -410,9 +571,12 @@ mod tests {
         assert_eq!(optimal.len(), 19);
         assert_eq!(byte_pair.len(), 20);
 
-        println!("103 bits: optimal={} chars, byte-pair={} chars, savings={}%",
-                 optimal.len(), byte_pair.len(),
-                 (byte_pair.len() - optimal.len()) * 100 / byte_pair.len());
+        println!(
+            "103 bits: optimal={} chars, byte-pair={} chars, savings={}%",
+            optimal.len(),
+            byte_pair.len(),
+            (byte_pair.len() - optimal.len()) * 100 / byte_pair.len()
+        );
     }
 
     #[test]
@@ -463,5 +627,165 @@ mod tests {
         let encoded_1024 = encode_bits(1024, &data_1024);
         let decoded_1024 = decode_bits(1024, &encoded_1024).unwrap();
         assert_eq!(decoded_1024, data_1024);
+    }
+
+    #[test]
+    fn optimized_paths_u64_boundary() {
+        // Test boundary between u64 and u128 paths (64 bits)
+        let data_64 = vec![0xFFu8; 8]; // 64 bits
+        let encoded = encode_bits(64, &data_64);
+        let decoded = decode_bits(64, &encoded).unwrap();
+        assert_eq!(decoded, data_64);
+
+        // Test just below boundary (63 bits)
+        let mut data_63 = vec![0xFFu8; 8];
+        data_63[7] = 0x7F; // Only 7 bits in last byte
+        let encoded = encode_bits(63, &data_63);
+        let decoded = decode_bits(63, &encoded).unwrap();
+        assert_eq!(decoded[7] & 0x7F, data_63[7]);
+    }
+
+    #[test]
+    fn optimized_paths_u128_boundary() {
+        // Test boundary between u128 and BigUint paths (128 bits)
+        let data_128 = vec![0xFFu8; 16]; // 128 bits
+        let encoded = encode_bits(128, &data_128);
+        let decoded = decode_bits(128, &encoded).unwrap();
+        assert_eq!(decoded, data_128);
+
+        // Test just above boundary (129 bits) - should use BigUint
+        let mut data_129 = vec![0xFFu8; 17];
+        data_129[16] = 0x01; // Only 1 bit in last byte for 129 total bits
+        let encoded = encode_bits(129, &data_129);
+        let decoded = decode_bits(129, &encoded).unwrap();
+        assert_eq!(decoded[16] & 0x01, data_129[16]);
+    }
+
+    #[test]
+    fn optimized_paths_small_bits() {
+        // Test small bit counts to ensure u64 path works correctly
+        // 1-7 bits (fits in 1 byte)
+        for bits in 1..=7 {
+            let mask = (1u8 << bits) - 1;
+            let data = vec![0x7Fu8 & mask]; // Only use bits that fit
+            let encoded = encode_bits(bits, &data);
+            let decoded = decode_bits(bits, &encoded).unwrap();
+            assert_eq!(decoded[0] & mask, data[0] & mask, "Failed for {bits} bits");
+        }
+
+        // 32 bits (u64 path)
+        let data_32 = vec![0x12, 0x34, 0x56, 0x78];
+        let encoded_32 = encode_bits(32, &data_32);
+        let decoded_32 = decode_bits(32, &encoded_32).unwrap();
+        assert_eq!(decoded_32, data_32);
+
+        // 48 bits (u64 path)
+        let data_48 = vec![0xFF; 6];
+        let encoded_48 = encode_bits(48, &data_48);
+        let decoded_48 = decode_bits(48, &encoded_48).unwrap();
+        assert_eq!(decoded_48, data_48);
+    }
+
+    #[test]
+    fn encode_bits_error_cases() {
+        // Test decode_bits error handling for invalid characters
+        assert!(matches!(
+            decode_bits(8, "ABC😀"),
+            Err(Base44Error::InvalidChar)
+        ));
+
+        assert!(matches!(
+            decode_bits(8, "ABC "),
+            Err(Base44Error::InvalidChar)
+        ));
+
+        // Test overflow detection in u64 path
+        // For 8 bits, max value is 255, but we can try to decode a value > 255
+        let large_value = "ZZZ"; // This represents a large value
+        let result = decode_bits(8, large_value);
+        assert!(matches!(result, Err(Base44Error::Overflow)));
+
+        // Test overflow detection in u128 path (65 bits)
+        let large_value_128 = "ZZZZZZZZZZZZZZ";
+        let result = decode_bits(65, large_value_128);
+        assert!(matches!(result, Err(Base44Error::Overflow)));
+    }
+
+    #[test]
+    fn encode_bits_various_patterns() {
+        // Test alternating bit patterns
+        let alternating = vec![0xAA, 0x55, 0xAA, 0x55]; // 10101010 01010101 pattern
+        let encoded = encode_bits(32, &alternating);
+        let decoded = decode_bits(32, &encoded).unwrap();
+        assert_eq!(decoded, alternating);
+
+        // Test sequential bytes
+        let sequential: Vec<u8> = (0..16).collect();
+        let encoded = encode_bits(128, &sequential);
+        let decoded = decode_bits(128, &encoded).unwrap();
+        assert_eq!(decoded, sequential);
+
+        // Test random-like data
+        let random = vec![0x9E, 0x3D, 0x7B, 0x2F, 0xC8, 0x15, 0x64, 0xAA];
+        let encoded = encode_bits(64, &random);
+        let decoded = decode_bits(64, &encoded).unwrap();
+        assert_eq!(decoded, random);
+    }
+
+    #[test]
+    fn cross_verify_encode_methods() {
+        // For byte-aligned data, verify encode_bits produces valid output
+        // (though not necessarily identical to encode due to different algorithms)
+
+        // 8 bits - single byte
+        let data_8 = vec![0x42];
+        let encoded_bits = encode_bits(8, &data_8);
+        let decoded_bits = decode_bits(8, &encoded_bits).unwrap();
+        assert_eq!(decoded_bits, data_8);
+
+        // 16 bits - two bytes
+        let data_16 = vec![0x12, 0x34];
+        let encoded_bits = encode_bits(16, &data_16);
+        let decoded_bits = decode_bits(16, &encoded_bits).unwrap();
+        assert_eq!(decoded_bits, data_16);
+
+        // Both methods should produce decodable results
+        let data = vec![0xAB, 0xCD];
+        let encoded_pair = encode(&data);
+        let encoded_bits = encode_bits(16, &data);
+
+        // Verify both can be decoded correctly
+        assert_eq!(decode(&encoded_pair).unwrap(), data);
+        assert_eq!(decode_bits(16, &encoded_bits).unwrap(), data);
+    }
+
+    #[test]
+    fn alphabet_completeness() {
+        // Verify all 44 characters in alphabet are unique
+        let mut chars: Vec<u8> = BASE44_ALPHABET.to_vec();
+        chars.sort();
+        chars.dedup();
+        assert_eq!(
+            chars.len(),
+            44,
+            "Alphabet should have exactly 44 unique characters"
+        );
+
+        // Verify b44_val maps all alphabet chars correctly
+        for (expected_val, &ch) in BASE44_ALPHABET.iter().enumerate() {
+            let val = b44_val(ch);
+            let ch_char = ch as char;
+            assert_eq!(
+                val,
+                Some(expected_val as u16),
+                "Character {ch_char} should map to value {expected_val}"
+            );
+        }
+
+        // Verify b44_val rejects invalid characters
+        for ch in [b' ', b'\t', b'\n', b'@', b'[', b'`', b'{'] {
+            let ch_char = ch as char;
+            assert_eq!(b44_val(ch), None, "Character {ch_char} should not be valid");
+        }
     }
 }
