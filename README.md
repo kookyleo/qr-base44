@@ -63,7 +63,7 @@ For fixed-bit-length data, `encode_bits` achieves optimal compression:
 |------|-------|---------------------|------------------------|---------|
 | 103  | 13    | 20 chars            | 19 chars               | 5.0%    |
 | 104  | 13    | 20 chars            | 20 chars               | 0%      |
-| 128  | 16    | 24 chars            | 25 chars               | -4.2%   |
+| 128  | 16    | 24 chars            | 24 chars               | 0%      |
 | 256  | 32    | 48 chars            | 47 chars               | 2.1%    |
 | 512  | 64    | 96 chars            | 94 chars               | 2.1%    |
 
