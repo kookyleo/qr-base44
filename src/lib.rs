@@ -99,6 +99,111 @@ pub fn decode(s: &str) -> Result<Vec<u8>, Base44Error> {
     Ok(out)
 }
 
+/// Encode a fixed number of bits (up to 128) as a Base44 string with optimal length.
+///
+/// This function treats the input bytes as a big integer containing exactly `bits` bits
+/// and encodes it using the minimum number of Base44 characters required.
+///
+/// # Optimal Encoding
+///
+/// For N bits, the optimal Base44 length is `ceil(N * log(2) / log(44))`:
+/// - 103 bits → 19 chars (2^103 < 44^19)
+/// - 104 bits → 20 chars (2^104 < 44^20)
+///
+/// This is more efficient than byte-pair encoding when the bit count doesn't align
+/// with byte boundaries, saving up to 5% space for certain bit lengths.
+///
+/// # Arguments
+///
+/// * `bits` - Number of significant bits (1-128). Bytes are read in little-endian order.
+/// * `bytes` - Input bytes in LSB-first order (matching typical bit-packing schemes).
+///
+/// # Example
+///
+/// ```
+/// // Encode 103 bits (13 bytes with top byte using 7 bits)
+/// let data = [0u8; 13];
+/// let encoded = qr_base44::encode_bits(103, &data);
+/// assert_eq!(encoded.len(), 19); // Optimal length for 103 bits
+/// ```
+pub fn encode_bits(bits: usize, bytes: &[u8]) -> String {
+    assert!(bits > 0 && bits <= 128, "bits must be 1-128");
+    assert!(bytes.len() <= 16, "bytes must be at most 16");
+
+    // Convert bytes to u128 (little-endian)
+    let mut value: u128 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        value |= (b as u128) << (i * 8);
+    }
+
+    // Calculate optimal character count: ceil(bits * log(2) / log(44))
+    // For N bits: 2^N < 44^chars, so chars = ceil(N * log(2) / log(44))
+    let chars_needed = ((bits as f64) * 2f64.ln() / 44f64.ln()).ceil() as usize;
+
+    // Convert to base44
+    let mut result = Vec::with_capacity(chars_needed);
+    let mut v = value;
+    for _ in 0..chars_needed {
+        let digit = (v % 44) as usize;
+        result.push(BASE44_ALPHABET[digit]);
+        v /= 44;
+    }
+
+    // Reverse to get most significant digit first
+    result.reverse();
+    String::from_utf8(result).unwrap()
+}
+
+/// Decode a Base44 string back to bytes, expecting a specific bit count.
+///
+/// This is the inverse of [`encode_bits`]. The output bytes are in little-endian order
+/// (LSB-first), matching typical bit-packing schemes.
+///
+/// # Arguments
+///
+/// * `bits` - Expected number of significant bits (1-128)
+/// * `s` - Base44 string to decode
+///
+/// # Returns
+///
+/// A vector of bytes in LSB-first order containing exactly `ceil(bits / 8)` bytes.
+/// Returns an error if the string contains invalid characters or the decoded value
+/// exceeds the specified bit count.
+///
+/// # Example
+///
+/// ```
+/// let encoded = qr_base44::encode_bits(103, &[0u8; 13]);
+/// let decoded = qr_base44::decode_bits(103, &encoded).unwrap();
+/// assert_eq!(decoded.len(), 13);
+/// ```
+pub fn decode_bits(bits: usize, s: &str) -> Result<Vec<u8>, Base44Error> {
+    assert!(bits > 0 && bits <= 128, "bits must be 1-128");
+
+    // Convert base44 string to u128
+    let mut value: u128 = 0;
+    for ch in s.chars() {
+        let digit = b44_val(ch as u8).ok_or(Base44Error::InvalidChar)? as u128;
+        value = value.checked_mul(44).ok_or(Base44Error::Overflow)?;
+        value = value.checked_add(digit).ok_or(Base44Error::Overflow)?;
+    }
+
+    // Verify value fits in specified bits
+    if bits < 128 && value >= (1u128 << bits) {
+        return Err(Base44Error::Overflow);
+    }
+
+    // Convert to bytes (little-endian)
+    let byte_count = (bits + 7) / 8;
+    let mut bytes = vec![0u8; byte_count];
+    for i in 0..byte_count {
+        bytes[i] = (value & 0xFF) as u8;
+        value >>= 8;
+    }
+
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +332,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn optimal_bit_encoding_103() {
+        // Test optimal encoding for 103 bits (common use case: UUID compression)
+        // 2^103 < 44^19, so 103 bits should encode to exactly 19 characters
+        let mut data = [0xFFu8; 13];
+        data[12] = 0x7F; // Only 7 bits in last byte for 103 total bits
+        let encoded = encode_bits(103, &data);
+        assert_eq!(encoded.len(), 19, "103 bits should encode to 19 chars");
+
+        let decoded = decode_bits(103, &encoded).unwrap();
+        assert_eq!(decoded, data.to_vec(), "Roundtrip should preserve data");
+    }
+
+    #[test]
+    fn optimal_bit_encoding_roundtrip() {
+        // Test various bit lengths for roundtrip accuracy
+        let test_cases = vec![
+            (8, vec![0x42]),
+            (16, vec![0x12, 0x34]),
+            (24, vec![0xAB, 0xCD, 0xEF]),
+            (103, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D]),
+            (128, vec![0xFF; 16]),
+        ];
+
+        for (bits, data) in test_cases {
+            let encoded = encode_bits(bits, &data);
+            let decoded = decode_bits(bits, &encoded).unwrap();
+
+            // Compare only the relevant bits
+            let byte_count = (bits + 7) / 8;
+            assert_eq!(decoded.len(), byte_count);
+
+            // Verify data matches (may need to mask last byte)
+            for i in 0..byte_count {
+                if i == byte_count - 1 && bits % 8 != 0 {
+                    let mask = (1u8 << (bits % 8)) - 1;
+                    assert_eq!(decoded[i] & mask, data[i] & mask);
+                } else {
+                    assert_eq!(decoded[i], data[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optimal_vs_byte_pair_comparison() {
+        // Compare optimal bit encoding vs byte-pair encoding for 103 bits
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+        let optimal = encode_bits(103, &data);
+        let byte_pair = encode(&data);
+
+        // Optimal should be 19 chars, byte-pair should be 20 chars
+        assert_eq!(optimal.len(), 19);
+        assert_eq!(byte_pair.len(), 20);
+
+        println!("103 bits: optimal={} chars, byte-pair={} chars, savings={}%",
+                 optimal.len(), byte_pair.len(),
+                 (byte_pair.len() - optimal.len()) * 100 / byte_pair.len());
+    }
+
+    #[test]
+    fn optimal_bit_encoding_edge_cases() {
+        // Test edge cases
+
+        // All zeros
+        let zeros = vec![0u8; 13];
+        let encoded_zeros = encode_bits(103, &zeros);
+        assert_eq!(encoded_zeros.len(), 19);
+        let decoded_zeros = decode_bits(103, &encoded_zeros).unwrap();
+        assert_eq!(decoded_zeros, zeros);
+
+        // Single bit
+        let one_bit = vec![0x01];
+        let encoded_one = encode_bits(1, &one_bit);
+        let decoded_one = decode_bits(1, &encoded_one).unwrap();
+        assert_eq!(decoded_one[0] & 0x01, 1);
+
+        // Maximum value for 103 bits
+        let mut max_103 = vec![0xFFu8; 13];
+        max_103[12] = 0x7F; // Only 7 bits in last byte
+        let encoded_max = encode_bits(103, &max_103);
+        let decoded_max = decode_bits(103, &encoded_max).unwrap();
+        assert_eq!(decoded_max, max_103);
     }
 }

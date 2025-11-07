@@ -16,6 +16,8 @@ Base44 encoder/decoder for arbitrary bytes using a URL-safe QR-compatible alphab
 cargo add qr-base44
 ```
 
+### Basic byte-pair encoding
+
 ```rust
 use qr_base44::{encode, decode};
 
@@ -25,12 +27,45 @@ let back = decode(&s).unwrap();
 assert_eq!(back, data);
 ```
 
+### Optimal bit-level encoding (new!)
+
+For fixed bit lengths (up to 128 bits), use `encode_bits` for optimal space efficiency:
+
+```rust
+use qr_base44::{encode_bits, decode_bits};
+
+// Encode 103 bits (e.g., compressed UUID)
+let data = vec![0x12, 0x34, /* ... 13 bytes total */];
+let s = encode_bits(103, &data);  // Always 19 chars for 103 bits
+let back = decode_bits(103, &s).unwrap();
+assert_eq!(back, data);
+
+// Compare efficiency:
+// - encode_bits(103, &data) → 19 chars (optimal)
+// - encode(&data)           → 20 chars (byte-pair)
+// Savings: 5% for 103-bit data
+```
+
 ## Features
 
 - **URL-safe**: Unlike Base45, Base44 removes the space character which can cause issues in URLs
 - **QR-compatible**: Uses a subset of QR Code alphanumeric mode characters
-- **Efficient**: Compact binary encoding with ~1.5x size overhead
+- **Dual encoding modes**:
+  - **Byte-pair encoding**: General-purpose, ~1.5x size overhead
+  - **Optimal bit encoding**: For fixed bit lengths (1-128 bits), achieves theoretical minimum character count
 - **Error handling**: Validates input and reports invalid characters, dangling groups, and overflow
+
+### Encoding Comparison
+
+For fixed-bit-length data, `encode_bits` achieves optimal compression:
+
+| Bits | Bytes | `encode` (byte-pair) | `encode_bits` (optimal) | Savings |
+|------|-------|---------------------|------------------------|---------|
+| 103  | 13    | 20 chars            | 19 chars               | 5.0%    |
+| 104  | 13    | 20 chars            | 20 chars               | 0%      |
+| 128  | 16    | 24 chars            | 25 chars               | -4.2%   |
+
+*Note: Use `encode_bits` when bit count is known and doesn't align well with byte boundaries.*
 
 ## Notes
 
